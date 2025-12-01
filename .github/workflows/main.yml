@@ -21,3 +21,23 @@ jobs:
           else
             echo "SMTP_PASS está definido"
           fi
+      - name: Send test email via swaks
+        env:
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          SMTP_TO: ${{ secrets.SMTP_TO }}
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y swaks
+          swaks --to "$SMTP_TO" \
+                --from "$SMTP_FROM" \
+                --server "$SMTP_HOST:$SMTP_PORT" \
+                --auth LOGIN \
+                --auth-user "$SMTP_USER" \
+                --auth-password "$SMTP_PASS" \
+                --tls \
+                --header "Subject: Test SMTP from GitHub Actions" \
+                --body "Este es un correo de prueba enviado desde GitHub Actions."
