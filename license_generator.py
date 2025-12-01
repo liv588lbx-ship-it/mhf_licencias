@@ -3,7 +3,7 @@ import json
 import base64
 import time
 import uuid
-import os # Necesario para la corrección de la ruta
+import os # ¡Importante para la corrección de la ruta!
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 

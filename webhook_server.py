@@ -40,8 +40,7 @@ else:
     print("Warning: STRIPE_API_KEY no definida. El manejo de Webhooks de Stripe estará deshabilitado.")
 
 DB_PATH = os.environ.get("DB_PATH", "licenses.db")
-PRIV_KEY_PATH = os.environ.get("PRIV_KEY_PATH", "priv.pem")
-PUB_KEY_PATH = os.environ.get("PUB_KEY_PATH", "pub.pem") # Usaremos esta ruta para validación
+PUB_KEY_PATH = os.environ.get("PUB_KEY_PATH", "pub.pem") 
 
 app = Flask(__name__)
 
@@ -62,7 +61,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-init_db()
+# init_db() se ha ELIMINADO de aquí para evitar WORKER TIMEOUTS.
 
 def save_license_record(payload, token):
     try:
@@ -107,7 +106,8 @@ def send_license_email(recipient_email, token):
         print(f"ÉXITO: Token enviado a {recipient_email}")
         return True
     except Exception as e:
-        print(f"ERROR enviando email: {e}")
+        # ESTA LÍNEA DE ERROR ES CRÍTICA: La buscaremos en los logs de Render
+        print(f"ERROR enviando email: {e}") 
         return False
 
 
@@ -151,12 +151,8 @@ def validar_licencia(token):
         if data.get("expires", 0) < now:
             return False, "expired", data
             
-        # Opcional: Verificar revocación en DB
-        # if is_revoked(data.get("license_id")): return False, "revoked", data
-
         return True, "valid", data
     except Exception as e:
-        # Esto captura errores de firma (SignatureVerificationError) o archivo no encontrado
         return False, str(e), None
 
 # --- RUTAS DE LA APLICACIÓN ---
@@ -185,7 +181,9 @@ def webhook():
 # -----------------------------------------------------------------
 @app.route("/admin/generate-token", methods=["POST"])
 def generate_and_send():
-    # Requiere la clave de administrador para evitar uso no autorizado
+    # Inicializa la DB aquí para asegurar que la tabla exista antes de guardar.
+    init_db() 
+    
     if request.headers.get("X-Admin-Key") != ADMIN_KEY:
         return jsonify({"error": "Unauthorized: Falta o es incorrecta la clave de administración."}), 401
 
@@ -206,7 +204,7 @@ def generate_and_send():
     
     return jsonify({
         "status": "success", 
-        "message": "Licencia generada y enviada. Revisa los logs para el estado del email.",
+        "message": "Licencia generada y enviada. Revisa los logs de Render para el estado del email.",
         "license_id": payload["license_id"],
         "token_sent": success
     }), 200
