@@ -5,29 +5,26 @@ import sqlite3
 import time
 from flask import Flask, request, jsonify
 
-# Importa la función make_license y save_license_record desde license_generator.py
-# Asegúrate de que ambas funciones existen y son exportadas correctamente.
-from license_generator import make_license, save_license_record 
+# CORRECCIÓN: Solo importamos make_license, porque save_license_record no está en ese archivo
+from license_generator import make_license
 
 # --- INICIALIZACIÓN DE CONFIGURACIÓN Y SERVICIOS ---
 
-# 1. Obtenemos las claves del entorno. Si no están, son None (Null).
 stripe_api_key = os.environ.get("STRIPE_API_KEY")
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET")
 
-# 2. Manejo Condicional de Stripe: Solo importa y configura si la clave existe.
+# Manejo Condicional de Stripe
 if stripe_api_key:
     import stripe
     stripe.api_key = stripe_api_key
     print("Stripe API key configurada.")
 else:
-    # Si la clave falta, mostramos el warning y la app continúa.
     print("Warning: STRIPE_API_KEY no definida. El manejo de Webhooks de Stripe estará deshabilitado.")
-
 
 # CONFIGURACIÓN DE RUTAS Y BASE DE DATOS
 DB_PATH = os.environ.get("DB_PATH", "licenses.db")
-PRIV_KEY_PATH = os.environ.get("PRIV_KEY_PATH", "priv.pem")
+# NOTA: Asegúrate de que este archivo (priv.pem) exista en Render o fallará al generar licencias
+PRIV_KEY_PATH = os.environ.get("PRIV_KEY_PATH", "priv.pem") 
 
 app = Flask(__name__)
 
@@ -48,27 +45,45 @@ def init_db():
 
 init_db()
 
+# --- FUNCIONES DE AYUDA (Agregada aquí porque no estaba en license_generator) ---
+
+def save_license_record(payload, token):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO licenses (id, user_email, token, issued, expires, meta) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                payload["license_id"], 
+                payload["user"], 
+                token, 
+                payload["issued"], 
+                payload["expires"], 
+                json.dumps(payload.get("extra", {}))
+            )
+        )
+        conn.commit()
+    except Exception as e:
+        print(f"Error guardando licencia en DB: {e}")
+    finally:
+        if conn:
+            conn.close()
+
 # --- RUTAS DE LA APLICACIÓN ---
 
 @app.route("/", methods=["GET"])
 def index():
-    # Ruta de chequeo de estado
     return jsonify({"status": "ok", "stripe_enabled": bool(stripe_api_key)}), 200
-
 
 @app.route("/health", methods=["GET"])
 def health():
-    # Ruta de salud de Render
     return jsonify({"status":"ok"}), 200
-
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    # 3. Guardias de seguridad: si Stripe no arrancó, sale aquí.
     if not stripe_api_key:
         return jsonify({"error": "Stripe no configurado en el servidor."}), 400
 
-    # Validar que exista el secret configurado
     if not STRIPE_WEBHOOK_SECRET:
         return jsonify({"error": "Webhook secret not configured"}), 500
 
@@ -76,22 +91,20 @@ def webhook():
     sig_header = request.headers.get("Stripe-Signature", None)
     
     try:
-        # Aquí usamos la función de Stripe, que sabemos que existe si la clave es válida.
         event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET) 
     except ValueError:
         return jsonify({"error": "Invalid payload"}), 400
     except stripe.error.SignatureVerificationError:
         return jsonify({"error": "Invalid signature"}), 400
 
-    # Procesar eventos de pago completado
+    # Procesar eventos de pago
     if event["type"] in ("checkout.session.completed", "payment_intent.succeeded"):
-        # Lógica de procesamiento de licencias
-        return jsonify({"status": "ok", "message": "License processing simulated successfully"}), 200
+        # AQUÍ IRÍA TU LÓGICA DE EXTRACCIÓN DE DATOS DE STRIPE
+        # Por ahora simulamos que todo salió bien para probar el deploy
+        return jsonify({"status": "ok", "message": "Webhook processed"}), 200
 
     return jsonify({"status": "ignored"}), 200
 
-
 if __name__ == "__main__":
-    # Ejecutar en modo desarrollo local
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=True)
