@@ -1,0 +1,23 @@
+name: Test SMTP secret
+
+on:
+  push:
+    branches: [ master ]
+
+jobs:
+  check-secret:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify SMTP_PASS is set
+        env:
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+        run: |
+          if [ -z "$SMTP_PASS" ]; then
+            echo "SMTP_PASS no está definido"
+            exit 1
+          else
+            echo "SMTP_PASS está definido"
+          fi
