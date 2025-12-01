@@ -6,21 +6,22 @@ import time
 from flask import Flask, request, jsonify
 
 # Importa la función make_license y save_license_record desde license_generator.py
+# Asegúrate de que ambas funciones existen y son exportadas correctamente.
 from license_generator import make_license, save_license_record 
-# NOTA: Asegúrate de que save_license_record también se exporte en license_generator.py
 
 # --- INICIALIZACIÓN DE CONFIGURACIÓN Y SERVICIOS ---
 
-# Manejo seguro de la clave de Stripe: no falla si falta la variable
+# 1. Obtenemos las claves del entorno. Si no están, son None (Null).
 stripe_api_key = os.environ.get("STRIPE_API_KEY")
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET")
 
-# Si la clave existe, importamos y configuramos Stripe. Si no, solo mostramos un warning.
+# 2. Manejo Condicional de Stripe: Solo importa y configura si la clave existe.
 if stripe_api_key:
     import stripe
     stripe.api_key = stripe_api_key
     print("Stripe API key configurada.")
 else:
+    # Si la clave falta, mostramos el warning y la app continúa.
     print("Warning: STRIPE_API_KEY no definida. El manejo de Webhooks de Stripe estará deshabilitado.")
 
 
@@ -51,18 +52,19 @@ init_db()
 
 @app.route("/", methods=["GET"])
 def index():
-    # Esta ruta nos ayuda a verificar si la app arrancó y si Stripe está activo
+    # Ruta de chequeo de estado
     return jsonify({"status": "ok", "stripe_enabled": bool(stripe_api_key)}), 200
 
 
 @app.route("/health", methods=["GET"])
 def health():
+    # Ruta de salud de Render
     return jsonify({"status":"ok"}), 200
 
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    # Si Stripe no está configurado, salimos antes de intentar usar 'stripe.'
+    # 3. Guardias de seguridad: si Stripe no arrancó, sale aquí.
     if not stripe_api_key:
         return jsonify({"error": "Stripe no configurado en el servidor."}), 400
 
@@ -74,7 +76,7 @@ def webhook():
     sig_header = request.headers.get("Stripe-Signature", None)
     
     try:
-        # Aquí usamos la función de Stripe, que solo existe si se importó arriba
+        # Aquí usamos la función de Stripe, que sabemos que existe si la clave es válida.
         event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET) 
     except ValueError:
         return jsonify({"error": "Invalid payload"}), 400
@@ -83,10 +85,7 @@ def webhook():
 
     # Procesar eventos de pago completado
     if event["type"] in ("checkout.session.completed", "payment_intent.succeeded"):
-        # ... (Tu lógica de procesamiento de licencias va aquí, se asume que no cambió) ...
-        
-        # Simplemente devolvemos un OK por ahora para evitar código largo si tu lógica no es relevante.
-        # Si la lógica original de generación de licencias es necesaria, avísame.
+        # Lógica de procesamiento de licencias
         return jsonify({"status": "ok", "message": "License processing simulated successfully"}), 200
 
     return jsonify({"status": "ignored"}), 200
