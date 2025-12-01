@@ -1,4 +1,3 @@
-# webhook_server.py
 import os
 import json
 import sqlite3
@@ -28,6 +27,8 @@ EMAIL_PASS = os.environ.get("EMAIL_PASS")
 
 # Clave de Administración (para proteger la ruta /admin/generate-token)
 ADMIN_KEY = os.environ.get("ADMIN_KEY")
+# DEBUG: Imprimir la clave leída para confirmar que Render la está cargando.
+print(f"DEBUG: ADMIN_KEY leída del entorno: '{ADMIN_KEY}'") 
 
 # --- INICIALIZACIÓN DE SERVICIOS ---
 
@@ -184,7 +185,9 @@ def generate_and_send():
     # Inicializa la DB aquí para asegurar que la tabla exista antes de guardar.
     init_db() 
     
+    # NOTA: La validación de la clave distingue mayúsculas y minúsculas.
     if request.headers.get("X-Admin-Key") != ADMIN_KEY:
+        # Aquí se usa ADMIN_KEY (la variable del entorno) para comparar.
         return jsonify({"error": "Unauthorized: Falta o es incorrecta la clave de administración."}), 401
 
     data = request.get_json()
