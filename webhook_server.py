@@ -114,7 +114,11 @@ def send_license_email(recipient_email, token):
 # --- FUNCIONES DE VALIDACIÓN DE TOKEN (Tomadas de client_verify.py) ---
 
 def load_public_key(path=PUB_KEY_PATH):
-    with open(path, "rb") as f:
+    # FIX: Usar os.path.realpath para encontrar la clave de forma segura en Render/Gunicorn
+    script_dir = os.path.dirname(os.path.realpath(__file__))
+    full_path = os.path.join(script_dir, path)
+    
+    with open(full_path, "rb") as f:
         return serialization.load_pem_public_key(f.read())
 
 def _b64url_decode_padded(s: str) -> bytes:
