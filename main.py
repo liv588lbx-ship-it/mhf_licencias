@@ -27,6 +27,7 @@ def send_email(to_email, token):
         msg["To"] = to_email
 
         server = smtplib.SMTP(smtp_host, smtp_port)
+        server.set_debuglevel(1)  # 🔹 Muestra todos los pasos SMTP en logs
         server.starttls()
         server.login(smtp_user, smtp_pass)
         server.send_message(msg)
@@ -48,4 +49,8 @@ def generate_token(req: TokenRequest, x_admin_key: str = Header(None)):
     # Intentar enviar email
     send_email(req.email, token)
     
-    return {"token": token, "status": "sent (o fallo en email, revisar logs)", "email": req.email}
+    return {
+        "token": token,
+        "status": "sent (o fallo en email, revisar logs)",
+        "email": req.email
+    }
