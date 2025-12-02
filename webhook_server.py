@@ -32,7 +32,9 @@ EMAIL_USER = os.environ.get("EMAIL_USER")
 EMAIL_PASS = os.environ.get("EMAIL_PASS")
 EMAIL_FROM = os.environ.get("EMAIL_FROM", EMAIL_USER)
 
-# Ejemplo de función auxiliar para enviar email (usa variables en tiempo de ejecución)
+# -------------------------------------------------------
+# Función para enviar email
+# -------------------------------------------------------
 def send_email(to_address, subject, body):
     host = os.environ.get("EMAIL_HOST")
     port = int(os.environ.get("EMAIL_PORT") or 25)
@@ -45,7 +47,6 @@ def send_email(to_address, subject, body):
     msg["From"] = from_addr
     msg["To"] = to_address
 
-    # Conexión SMTP con timeout razonable
     s = smtplib.SMTP(host, port, timeout=10)
     try:
         if user and password:
@@ -55,10 +56,11 @@ def send_email(to_address, subject, body):
     finally:
         s.quit()
 
-# Ruta de ejemplo para generar token admin
+# -------------------------------------------------------
+# Ruta admin para generar token manualmente
+# -------------------------------------------------------
 @app.route("/admin/generate-token", methods=["POST"])
 def generate_token():
-    # Leer ADMIN_KEY en tiempo de petición
     expected_key = os.environ.get("ADMIN_KEY")
     provided_key = request.headers.get("X-Admin-Key")
 
@@ -66,7 +68,6 @@ def generate_token():
         logging.error("ADMIN_KEY no está definida en el entorno")
         return Response("Server misconfigured", status=500)
 
-    # Validación segura de la cabecera
     if provided_key != expected_key:
         logging.info("Unauthorized attempt to /admin/generate-token")
         return Response("Unauthorized", status=401)
@@ -77,14 +78,15 @@ def generate_token():
         if not email:
             return jsonify({"error": "email required"}), 400
 
-        # Lógica de generación de token/licencia (delegada)
-        token = make_license(email)  # asume que make_license devuelve el token/objeto
+        token = make_license(email)
         return jsonify({"token": token}), 200
     except Exception as e:
         logging.exception("Error generating token")
         return jsonify({"error": "internal error"}), 500
 
-# Ejemplo de webhook que también valida X-Admin-Key en tiempo de petición
+# -------------------------------------------------------
+# Webhook genérico (no afecta PayPal)
+# -------------------------------------------------------
 @app.route("/webhook", methods=["POST"])
 def webhook_handler():
     expected_key = os.environ.get("ADMIN_KEY")
@@ -98,19 +100,61 @@ def webhook_handler():
         logging.info("Unauthorized webhook call")
         return Response("Unauthorized", status=401)
 
-    # Procesar el webhook de forma segura y con timeouts en llamadas externas
     try:
         data = request.get_json(force=True)
-        # Procesamiento mínimo de ejemplo
         logging.info("Received webhook event")
-        # ... lógica de negocio ...
         return jsonify({"status": "ok"}), 200
     except Exception:
         logging.exception("Error processing webhook")
         return jsonify({"error": "internal error"}), 500
 
-# Punto de entrada para pruebas locales
+# -------------------------------------------------------
+# 🌟 WEBHOOK DE PAYPAL — AQUÍ SE GENERA Y ENVÍA EL TOKEN
+# -------------------------------------------------------
+@app.route("/paypal-webhook", methods=["POST"])
+def paypal_webhook():
+    try:
+        data = request.get_json(force=True)
+
+        logging.info("📩 PAYPAL WEBHOOK RECIBIDO")
+        logging.info(json.dumps(data, indent=2))
+
+        event_type = data.get("event_type")
+
+        if event_type not in ["PAYMENT.SALE.COMPLETED", "PAYMENT.CAPTURE.COMPLETED"]:
+            logging.info(f"Ignorado evento PayPal: {event_type}")
+            return jsonify({"status": "ignored"}), 200
+
+        payer_info = (
+            data.get("resource", {})
+                .get("payer", {})
+                .get("payer_info", {})
+        )
+
+        email = payer_info.get("email") or payer_info.get("email_address")
+
+        if not email:
+            logging.error("❌ No se pudo encontrar el email del comprador.")
+            return jsonify({"error": "email not found"}), 400
+
+        token = make_license(email)
+
+        subject = "Tu licencia - Mercenary Help Finder"
+        body = f"Gracias por tu compra.\n\nTu token es:\n{token}\n\nPegalo en la UI para activar tu licencia."
+
+        send_email(email, subject, body)
+
+        logging.info(f"✔️ Token enviado a {email}")
+
+        return jsonify({"status": "success"}), 200
+
+    except Exception as e:
+        logging.exception("Error en PayPal webhook")
+        return jsonify({"error": "internal error"}), 500
+
+# -------------------------------------------------------
+# Punto de entrada local
+# -------------------------------------------------------
 if __name__ == "__main__":
-    # Usar puerto 10000 por compatibilidad con Render (o $PORT en producción)
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
