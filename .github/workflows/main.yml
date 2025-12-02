@@ -21,7 +21,7 @@ jobs:
           else
             echo "SMTP_PASS está definido"
           fi
-      - name: Send test email via swaks
+           - name: Send test email via swaks
         env:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
@@ -39,5 +39,7 @@ jobs:
                 --auth-user "$SMTP_USER" \
                 --auth-password "$SMTP_PASS" \
                 --tls \
+                --header "From: TotalHelp <$SMTP_FROM>" \
                 --header "Subject: Test SMTP from GitHub Actions" \
                 --body "Este es un correo de prueba enviado desde GitHub Actions."
+
