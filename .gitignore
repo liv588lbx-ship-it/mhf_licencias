@@ -8,3 +8,4 @@ set_env.bat
 set_env.bat 
 .venv/ 
 "priv.pem" 
+**/priv.pem 
