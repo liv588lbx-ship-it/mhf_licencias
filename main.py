@@ -15,21 +15,26 @@ class TokenRequest(BaseModel):
     email: str
 
 def send_email(to_email, token):
-    smtp_host = "smtp.gmail.com"
-    smtp_port = 587
-    smtp_user = os.environ.get("SMTP_USER")
-    smtp_pass = os.environ.get("SMTP_PASS")
+    try:
+        smtp_host = "smtp.gmail.com"
+        smtp_port = 587
+        smtp_user = os.environ.get("SMTP_USER")
+        smtp_pass = os.environ.get("SMTP_PASS")
 
-    msg = MIMEText(f"Tu token de licencia es: {token}")
-    msg["Subject"] = "Tu licencia"
-    msg["From"] = smtp_user
-    msg["To"] = to_email
+        msg = MIMEText(f"Tu token de licencia es: {token}")
+        msg["Subject"] = "Tu licencia"
+        msg["From"] = smtp_user
+        msg["To"] = to_email
 
-    server = smtplib.SMTP(smtp_host, smtp_port)
-    server.starttls()
-    server.login(smtp_user, smtp_pass)
-    server.send_message(msg)
-    server.quit()
+        server = smtplib.SMTP(smtp_host, smtp_port)
+        server.starttls()
+        server.login(smtp_user, smtp_pass)
+        server.send_message(msg)
+        server.quit()
+        print(f"✅ Correo enviado a {to_email} correctamente")
+    except Exception as e:
+        print(f"❌ ERROR enviando email a {to_email}: {e}")
+        # No detener la API, solo loguea el error
 
 @app.post("/admin/generate-token")
 def generate_token(req: TokenRequest, x_admin_key: str = Header(None)):
@@ -40,7 +45,7 @@ def generate_token(req: TokenRequest, x_admin_key: str = Header(None)):
     # Generar token
     token, payload = make_license(req.email)
     
-    # Enviar email
+    # Intentar enviar email
     send_email(req.email, token)
     
-    return {"token": token, "status": "sent", "email": req.email}
+    return {"token": token, "status": "sent (o fallo en email, revisar logs)", "email": req.email}
