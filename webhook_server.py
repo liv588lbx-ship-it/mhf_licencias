@@ -18,11 +18,11 @@ from license_generator import make_license
 
 # Logging de arranque para verificar despliegue
 logging.basicConfig(level=logging.INFO)
-logging.info("WEBHOOK_SERVER LOADED - CASADEY v2")
+logging.info("WEBHOOK_SERVER LOADED - CASADEY v3")
 
 app = Flask(__name__)
 
-# Configuración de otras variables de entorno (leídas cuando se usan)
+# Configuración de otras variables de entorno
 stripe_api_key = os.environ.get("STRIPE_API_KEY")
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET")
 
@@ -85,7 +85,7 @@ def generate_token():
         return jsonify({"error": "internal error"}), 500
 
 # -------------------------------------------------------
-# Webhook genérico (no afecta PayPal)
+# Webhook genérico
 # -------------------------------------------------------
 @app.route("/webhook", methods=["POST"])
 def webhook_handler():
@@ -109,7 +109,7 @@ def webhook_handler():
         return jsonify({"error": "internal error"}), 500
 
 # -------------------------------------------------------
-# 🌟 WEBHOOK DE PAYPAL — AQUÍ SE GENERA Y ENVÍA EL TOKEN
+# 🌟 WEBHOOK DE PAYPAL — GENERA Y ENVÍA EL TOKEN
 # -------------------------------------------------------
 @app.route("/paypal-webhook", methods=["POST"])
 def paypal_webhook():
@@ -125,22 +125,54 @@ def paypal_webhook():
             logging.info(f"Ignorado evento PayPal: {event_type}")
             return jsonify({"status": "ignored"}), 200
 
-        payer_info = (
+        # ---------------------------------------------------
+        # 1) INTENTO ANTIGUO (payer -> payer_info)
+        # ---------------------------------------------------
+        email = (
             data.get("resource", {})
                 .get("payer", {})
                 .get("payer_info", {})
+                .get("email")
         )
 
-        email = payer_info.get("email") or payer_info.get("email_address")
-
+        # ---------------------------------------------------
+        # 2) INTENTO NUEVO (resource -> payer -> email_address)
+        # ---------------------------------------------------
         if not email:
-            logging.error("❌ No se pudo encontrar el email del comprador.")
+            email = (
+                data.get("resource", {})
+                    .get("payer", {})
+                    .get("email_address")
+            )
+
+        # ---------------------------------------------------
+        # 3) FORMATO MÁS NUEVO AÚN (purchase_units[n].shipping/email)
+        # ---------------------------------------------------
+        if not email:
+            purchase_units = data.get("resource", {}).get("purchase_units", [])
+            if purchase_units and isinstance(purchase_units, list):
+                shipping = purchase_units[0].get("shipping", {})
+                email = shipping.get("email") or shipping.get("email_address")
+
+        # ---------------------------------------------------
+        # Si sigue sin email: error
+        # ---------------------------------------------------
+        if not email:
+            logging.error("❌ No se pudo encontrar el email del comprador (ningún formato conocido).")
             return jsonify({"error": "email not found"}), 400
 
+        logging.info(f"📨 Email detectado: {email}")
+
+        # Generar token
         token = make_license(email)
 
         subject = "Tu licencia - Mercenary Help Finder"
-        body = f"Gracias por tu compra.\n\nTu token es:\n{token}\n\nPegalo en la UI para activar tu licencia."
+        body = (
+            "Gracias por tu compra.\n\n"
+            "Tu token es:\n"
+            f"{token}\n\n"
+            "Pegalo en la UI para activar tu licencia."
+        )
 
         send_email(email, subject, body)
 
