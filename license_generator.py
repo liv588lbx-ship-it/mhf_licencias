@@ -1,178 +1,197 @@
+import os
 import json
 import base64
 import time
-import uuid
-import os
-import datetime # Nuevo: Importado para calcular la expiración a 100 años
-import logging  # Nuevo: Para manejo de errores en el servidor
+from datetime import datetime, timedelta, timezone
+
+# Criptografía (RSA + SHA256)
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
-from cryptography.exceptions import InvalidSignature # Nuevo: Para manejar el error 401 específicamente
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
-logging.basicConfig(level=logging.INFO)
+# ------------------------------
+# Utilidades de carga de claves
+# ------------------------------
 
-# --- CONFIGURACIÓN Y CACHÉ DE CLAVE PRIVADA (GENERACIÓN) ---
-
-_PRIVATE_KEY_CACHE = None
-PRIV_KEY_PATH = "priv.pem" 
-
-def load_private_key(path=PRIV_KEY_PATH):
-    # Carga la clave privada desde la variable de entorno PRIVATE_KEY_PEM
-    global _PRIVATE_KEY_CACHE
-
-    if _PRIVATE_KEY_CACHE is not None:
-        return _PRIVATE_KEY_CACHE
-
-    priv_key_pem = os.environ.get("PRIVATE_KEY_PEM")
-    if not priv_key_pem:
-        logging.error("CRÍTICO: No se encontró PRIVATE_KEY_PEM en variables de entorno.")
-        raise FileNotFoundError(
-            "No se encontró la clave privada en la variable de entorno PRIVATE_KEY_PEM"
-        )
-
-    try:
-        key = serialization.load_pem_private_key(
-            priv_key_pem.encode("utf-8"),
-            password=None
-        )
-        _PRIVATE_KEY_CACHE = key
-        return key
-    except Exception as e:
-        logging.critical(f"CRITICAL ERROR: No se pudo cargar la clave privada desde PRIVATE_KEY_PEM: {e}")
-        raise e
-
-# --- FUNCIÓN DE GENERACIÓN (make_license) ---
-
-def make_license(user_email, validity_hours=36, priv_key_path=PRIV_KEY_PATH, extra=None):
+def _load_private_key():
     """
-    Crea un token firmado que representa una licencia.
-    La expiración se establece a 100 años para simular "nunca expira hasta la activación".
+    Carga SIEMPRE la misma clave privada desde:
+    1) Variable de entorno PRIVATE_KEY_PEM (preferida)
+    2) /etc/secrets/priv.pem (Secret Files de Render)
+    3) /opt/render/project/src/priv.pem (legacy)
     """
-    try:
-        priv = load_private_key(priv_key_path)
-    except Exception:
-        # Fallo si la clave privada no se carga
-        raise Exception("Error interno: Clave privada no cargada para firmar.")
+    pem = os.getenv("PRIVATE_KEY_PEM")
+    if pem:
+        return load_pem_private_key(pem.encode("utf-8"), password=None)
 
+    for path in ("/etc/secrets/priv.pem", "/opt/render/project/src/priv.pem"):
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+            return load_pem_private_key(data, password=None)
+        except FileNotFoundError:
+            continue
 
-    issued = int(time.time())
-    
-    # === CORRECCIÓN DE LÓGICA DE EXPIRACIÓN (100 AÑOS) ===
-    # Establece una expiración lejana para que el token no caduque antes del primer uso.
-    far_future = datetime.datetime.now() + datetime.timedelta(days=365 * 100)
-    expires = int(far_future.timestamp())
-    # ======================================================
-    
-    license_id = str(uuid.uuid4())
+    raise FileNotFoundError("No se encontró PRIVATE_KEY_PEM ni priv.pem en las rutas conocidas.")
 
-    payload = {
-        "license_id": license_id,
-        "user": user_email,
-        "issued": issued,
-        "expires": expires,          # <-- ¡Ahora es a 100 años!
-        "valid_hours": validity_hours, # <-- Horas reales de uso
-        "extra": extra or {}
-    }
+def _get_public_key():
+    """Deriva la clave pública desde la misma privada para garantizar sincronía."""
+    return _load_private_key().public_key()
 
-    # Asegura que la serialización JSON sea consistente para la firma
-    payload_json = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+# ------------------------------
+# Firma y verificación cripto
+# ------------------------------
 
-    signature = priv.sign(
-        payload_json,
-        padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
+def sign_bytes(payload_bytes: bytes) -> bytes:
+    """Firma bytes con la clave privada unificada (RSA PKCS1v15 + SHA256)."""
+    priv = _load_private_key()
+    return priv.sign(
+        payload_bytes,
+        padding.PKCS1v15(),
         hashes.SHA256()
     )
 
-    token = (
-        base64.urlsafe_b64encode(payload_json).decode().rstrip("=")
-        + "."
-        + base64.urlsafe_b64encode(signature).decode().rstrip("=")
+def verify_bytes(payload_bytes: bytes, signature: bytes) -> None:
+    """
+    Verifica con la clave pública derivada de la misma privada.
+    Lanza excepción (InvalidSignature) si la verificación falla.
+    """
+    pub = _get_public_key()
+    pub.verify(
+        signature,
+        payload_bytes,
+        padding.PKCS1v15(),
+        hashes.SHA256()
     )
 
-    return token, payload
+# ------------------------------
+# Helpers de token
+# ------------------------------
 
-# ==============================================================================
-# LÓGICA DE VERIFICACIÓN
-# ==============================================================================
+def _now_ts():
+    return int(time.time())
 
-_PUBLIC_KEY_CACHE = None
+def _to_iso(ts: int):
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
-def load_public_key(path="pub.pem"):
-    """Carga la clave pública desde el archivo pub.pem."""
-    global _PUBLIC_KEY_CACHE
-    if _PUBLIC_KEY_CACHE is not None:
-        return _PUBLIC_KEY_CACHE
+def _canonical_json(data: dict) -> bytes:
+    """
+    Serializa en JSON con orden estable y sin espacios, para que
+    la firma/verificación siempre use los mismos bytes.
+    """
+    return json.dumps(data, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+def _b64url_encode(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).decode("ascii").rstrip("=")
+
+def _b64url_decode(s: str) -> bytes:
+    padding = "=" * ((4 - len(s) % 4) % 4)
+    return base64.urlsafe_b64decode(s + padding)
+
+# ------------------------------
+# API principal: generación y check
+# ------------------------------
+
+def make_license(user_email: str, duration_hours: int = 24):
+    """
+    Genera un token firmado para user_email con una expiración fija.
+    Devuelve (token, metadata).
+    - token: string seguro, con payload y firma en base64url.
+    - metadata: dict útil para logs/UI.
+    """
+    if not user_email or "@" not in user_email:
+        raise ValueError("Email inválido para generar licencia.")
+
+    iat = _now_ts()
+    exp = iat + duration_hours * 3600
+
+    payload = {
+        "user": user_email,
+        "issued_at": iat,
+        "expires": exp,
+        "version": 1
+    }
+
+    payload_bytes = _canonical_json(payload)
+    signature = sign_bytes(payload_bytes)
+
+    token_struct = {
+        "payload": _b64url_encode(payload_bytes),
+        "sig": _b64url_encode(signature),
+        "alg": "RS256",
+        "typ": "MHF-LIC"
+    }
+
+    token = _b64url_encode(_canonical_json(token_struct))
+
+    metadata = {
+        "user": user_email,
+        "issued_at": _to_iso(iat),
+        "expires": _to_iso(exp),
+        "duration_hours": duration_hours
+    }
+
+    return token, metadata
+
+def check_license(token: str) -> dict:
+    """
+    Verifica el token:
+    - Estructura válida
+    - Firma válida
+    - No expirado
+
+    Devuelve metadata dict con 'user' y 'expires' si es válido.
+    Lanza excepciones con mensajes específicos si es inválido.
+    """
+    if not token or not isinstance(token, str):
+        raise Exception("TOKEN INVÁLIDO: Formato de token vacío o incorrecto.")
 
     try:
-        # CRÍTICO: Abre el archivo con el nombre 'pub.pem'
-        with open(path, "rb") as f:
-            key = serialization.load_pem_public_key(f.read())
-            _PUBLIC_KEY_CACHE = key
-            return key
-    except FileNotFoundError:
-        logging.error(f"Error: No se encontró la clave pública en {path}. ¡Despliegue incompleto!")
-        raise Exception(f"Falta archivo de clave: {path}")
-    except Exception as e:
-        logging.error(f"Error al cargar la clave pública: {e}")
-        raise Exception(f"Error de formato al cargar la clave: {path}")
+        token_json_bytes = _b64url_decode(token)
+        token_struct = json.loads(token_json_bytes.decode("utf-8"))
+    except Exception:
+        raise Exception("TOKEN INVÁLIDO: No se pudo decodificar el contenedor base64/JSON.")
 
-def _b64url_decode_padded(s: str) -> bytes:
-    """Restaura el padding faltante para base64 urlsafe."""
-    s = s.replace("-", "+").replace("_", "/")
-    padding_needed = (4 - len(s) % 4) % 4
-    s += "=" * padding_needed
-    return base64.b64decode(s)
+    # Validación mínima del contenedor
+    if token_struct.get("typ") != "MHF-LIC" or token_struct.get("alg") != "RS256":
+        raise Exception("TOKEN INVÁLIDO: Tipo/algoritmo desconocido.")
 
-def check_license_base(token, pub_key_path="pub.pem"):
-    """Función de validación base que devuelve (ok, msg, data)."""
+    payload_b64 = token_struct.get("payload")
+    sig_b64 = token_struct.get("sig")
+    if not payload_b64 or not sig_b64:
+        raise Exception("TOKEN INVÁLIDO: Falta payload o firma.")
+
     try:
-        pub = load_public_key(pub_key_path)
-        if "." not in token:
-            return False, "invalid_format", None
-        
-        payload_b64, sig_b64 = token.split(".", 1)
-        payload = _b64url_decode_padded(payload_b64)
-        sig = _b64url_decode_padded(sig_b64)
-        
-        # Verificar firma (si falla, lanza InvalidSignature)
-        pub.verify(
-            sig,
-            payload,
-            padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
-            hashes.SHA256()
-        )
-        
-        data = json.loads(payload)
-        now = int(time.time())
-        
-        # Verificación de la expiración criptográfica (la de 100 años)
-        if data.get("expires", 0) < now:
-            return False, "expired", data
-            
-        return True, "valid", data
-        
-    except InvalidSignature:
-        # ¡Este es el error 401 persistente!
-        logging.error("FALLO DE FIRMA CRÍTICO: El token no coincide con la clave pública (pub.pem).")
-        return False, "Falló la verificación de la firma. Claves desincronizadas.", None
+        payload_bytes = _b64url_decode(payload_b64)
+        signature = _b64url_decode(sig_b64)
+    except Exception:
+        raise Exception("TOKEN INVÁLIDO: No se pudo decodificar payload/firma.")
 
-    except Exception as e:
-        # Error de formato o cualquier otro problema criptográfico
-        return False, str(e), None
+    # Verificar firma
+    try:
+        verify_bytes(payload_bytes, signature)
+    except Exception:
+        raise Exception("Falló la verificación de la firma. Claves desincronizadas.")
 
-def check_license(token):
-    """
-    Función requerida por webhook_server.py.
-    Verifica el token y lanza una excepción si es inválido o expirado.
-    """
-    ok, msg, data = check_license_base(token)
+    # Parsear payload y chequear expiración
+    try:
+        payload = json.loads(payload_bytes.decode("utf-8"))
+    except Exception:
+        raise Exception("TOKEN INVÁLIDO: Payload ilegible.")
 
-    if ok:
-        # Éxito: Devuelve los metadatos.
-        return data
-    elif msg == "expired":
-        # Fallo: Lanza excepción específica.
-        raise Exception("LICENCIA EXPIRADA. El token ha superado su vigencia criptográfica de 100 años.")
-    else:
-        # Fallo: Lanza excepción para firma inválida, etc.
-        raise Exception(f"TOKEN INVÁLIDO o FALLO DE FIRMA: {msg}")
+    exp = payload.get("expires")
+    user = payload.get("user")
+    if not isinstance(exp, int) or not user:
+        raise Exception("TOKEN INVÁLIDO: Campos requeridos ausentes (user/expires).")
+
+    now = _now_ts()
+    if now >= exp:
+        raise Exception("LICENCIA EXPIRADA: El token ya no es válido.")
+
+    # OK: token válido
+    return {
+        "user": user,
+        "issued_at": _to_iso(payload.get("issued_at", now)),
+        "expires": _to_iso(exp),
+        "version": payload.get("version", 1)
+    }
