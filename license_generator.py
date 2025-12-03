@@ -1,4 +1,3 @@
-# license_generator.py
 import os
 import json
 import base64
@@ -90,29 +89,26 @@ def _b64url_decode(s: str) -> bytes:
     return base64.urlsafe_b64decode(s + padding)
 
 # ------------------------------
-# API principal: generación, activación y check
+# API principal: generación y check
 # ------------------------------
 
-def make_license(user_email: str, duration_hours: int = 36):
+def make_license(user_email: str, duration_hours: int = 24):
     """
-    Genera un token firmado para user_email.
-    Diseño: el token NO está activado por defecto (no tiene expires efectivo).
-    - duration_hours: cuántas horas durará la licencia una vez activada (por defecto 36).
+    Genera un token firmado para user_email con una expiración fija.
     Devuelve (token, metadata).
+    - token: string seguro, con payload y firma en base64url.
+    - metadata: dict útil para logs/UI.
     """
     if not user_email or "@" not in user_email:
         raise ValueError("Email inválido para generar licencia.")
 
     iat = _now_ts()
+    exp = iat + duration_hours * 3600
 
-    # No fijamos expires en la emisión: la licencia se activa más tarde.
-    # Guardamos duration_hours para que la activación calcule la expiración.
     payload = {
         "user": user_email,
         "issued_at": iat,
-        "activated_at": None,        # None hasta que se active
-        "expires": None,             # None hasta que se active
-        "duration_hours": int(duration_hours),
+        "expires": exp,
         "version": 1
     }
 
@@ -131,118 +127,18 @@ def make_license(user_email: str, duration_hours: int = 36):
     metadata = {
         "user": user_email,
         "issued_at": _to_iso(iat),
-        "duration_hours": int(duration_hours)
+        "expires": _to_iso(exp),
+        "duration_hours": duration_hours
     }
 
     return token, metadata
-
-def activate_license(token: str, force_duration_hours: int = None):
-    """
-    Activa un token NO activado:
-    - Verifica firma del token original.
-    - Si ya está activado, devuelve el token original (o puede regenerar).
-    - Si no está activado, genera un NUEVO token firmado con:
-        activated_at = now
-        expires = activated_at + duration_hours*3600
-      donde duration_hours se toma de payload['duration_hours'] o de force_duration_hours si se pasa.
-    Devuelve (new_token, metadata).
-    """
-    if not token or not isinstance(token, str):
-        raise Exception("TOKEN INVÁLIDO: Formato de token vacío o incorrecto.")
-
-    # Decodificar contenedor
-    try:
-        token_json_bytes = _b64url_decode(token)
-        token_struct = json.loads(token_json_bytes.decode("utf-8"))
-    except Exception:
-        raise Exception("TOKEN INVÁLIDO: No se pudo decodificar el contenedor base64/JSON.")
-
-    # Validación mínima
-    if token_struct.get("typ") != "MHF-LIC" or token_struct.get("alg") != "RS256":
-        raise Exception("TOKEN INVÁLIDO: Tipo/algoritmo desconocido.")
-
-    payload_b64 = token_struct.get("payload")
-    sig_b64 = token_struct.get("sig")
-    if not payload_b64 or not sig_b64:
-        raise Exception("TOKEN INVÁLIDO: Falta payload o firma.")
-
-    try:
-        payload_bytes = _b64url_decode(payload_b64)
-        signature = _b64url_decode(sig_b64)
-    except Exception:
-        raise Exception("TOKEN INVÁLIDO: No se pudo decodificar payload/firma.")
-
-    # Verificar firma del token original
-    try:
-        verify_bytes(payload_bytes, signature)
-    except Exception:
-        raise Exception("Falló la verificación de la firma. Claves desincronizadas.")
-
-    # Parsear payload
-    try:
-        payload = json.loads(payload_bytes.decode("utf-8"))
-    except Exception:
-        raise Exception("TOKEN INVÁLIDO: Payload ilegible.")
-
-    # Si ya está activado, devolvemos el token tal cual (o podríamos regenerarlo)
-    if payload.get("activated_at"):
-        # Ya activado: devolver info actual
-        return token, {
-            "user": payload.get("user"),
-            "activated_at": _to_iso(payload.get("activated_at")),
-            "expires": _to_iso(payload.get("expires")) if payload.get("expires") else None,
-            "duration_hours": payload.get("duration_hours", None)
-        }
-
-    # Determinar duración a usar
-    duration = None
-    try:
-        duration = int(payload.get("duration_hours")) if payload.get("duration_hours") else None
-    except Exception:
-        duration = None
-    if force_duration_hours is not None:
-        duration = int(force_duration_hours)
-    if not duration:
-        # fallback seguro
-        duration = int(os.getenv("LICENSE_DURATION_HOURS", "36"))
-
-    # Calcular activated_at y expires
-    activated_at = _now_ts()
-    expires = activated_at + int(duration) * 3600
-
-    # Actualizar payload y firmar nuevo token
-    payload["activated_at"] = activated_at
-    payload["expires"] = expires
-    payload["duration_hours"] = int(duration)
-
-    new_payload_bytes = _canonical_json(payload)
-    new_signature = sign_bytes(new_payload_bytes)
-
-    new_token_struct = {
-        "payload": _b64url_encode(new_payload_bytes),
-        "sig": _b64url_encode(new_signature),
-        "alg": "RS256",
-        "typ": "MHF-LIC"
-    }
-
-    new_token = _b64url_encode(_canonical_json(new_token_struct))
-
-    metadata = {
-        "user": payload.get("user"),
-        "activated_at": _to_iso(activated_at),
-        "expires": _to_iso(expires),
-        "duration_hours": int(duration)
-    }
-
-    return new_token, metadata
 
 def check_license(token: str) -> dict:
     """
     Verifica el token:
     - Estructura válida
     - Firma válida
-    - Si está activado: comprobar expiración (activated_at + duration_hours)
-    - Si NO está activado: lanzar excepción indicando que no está activado
+    - No expirado
 
     Devuelve metadata dict con 'user' y 'expires' si es válido.
     Lanza excepciones con mensajes específicos si es inválido.
@@ -277,41 +173,25 @@ def check_license(token: str) -> dict:
     except Exception:
         raise Exception("Falló la verificación de la firma. Claves desincronizadas.")
 
-    # Parsear payload
+    # Parsear payload y chequear expiración
     try:
         payload = json.loads(payload_bytes.decode("utf-8"))
     except Exception:
         raise Exception("TOKEN INVÁLIDO: Payload ilegible.")
 
+    exp = payload.get("expires")
     user = payload.get("user")
-    if not user:
-        raise Exception("TOKEN INVÁLIDO: Campo 'user' ausente.")
+    if not isinstance(exp, int) or not user:
+        raise Exception("TOKEN INVÁLIDO: Campos requeridos ausentes (user/expires).")
 
-    # Si el token trae 'activated_at' y 'duration_hours', calcular expiración
-    activated_at = payload.get("activated_at")
-    expires_field = payload.get("expires")
-    duration_hours = payload.get("duration_hours")
+    now = _now_ts()
+    if now >= exp:
+        raise Exception("LICENCIA EXPIRADA: El token ya no es válido.")
 
-    # Caso 1: token ya activado (payload contiene activated_at y expires)
-    if isinstance(activated_at, int) and isinstance(duration_hours, int):
-        # calcular expiración por seguridad (aceptar expires si coincide)
-        computed_expires = int(activated_at) + int(duration_hours) * 3600
-        now = _now_ts()
-        if now >= computed_expires:
-            raise Exception("LICENCIA EXPIRADA: El token ya no es válido.")
-        # OK
-        return {
-            "user": user,
-            "issued_at": _to_iso(payload.get("issued_at", activated_at)),
-            "activated_at": _to_iso(activated_at),
-            "expires": _to_iso(computed_expires),
-            "version": payload.get("version", 1)
-        }
-
-    # Caso 2: token no activado aún -> no es válido para iniciar uso
-    # (según tu diseño, el token no tiene fecha de expiración hasta activarse)
-    raise Exception("LICENCIA NO ACTIVADA: El token aún no fue activado.")
-
-# ------------------------------
-# Fin del módulo
-# ------------------------------
+    # OK: token válido
+    return {
+        "user": user,
+        "issued_at": _to_iso(payload.get("issued_at", now)),
+        "expires": _to_iso(exp),
+        "version": payload.get("version", 1)
+    }
