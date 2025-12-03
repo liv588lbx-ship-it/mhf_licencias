@@ -6,6 +6,7 @@ import base64
 import hashlib
 import smtplib
 import logging
+import ssl # <--- ¡IMPORTACIÓN AÑADIDA!
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 
@@ -33,11 +34,12 @@ EMAIL_PASS = os.environ.get("EMAIL_PASS")
 EMAIL_FROM = os.environ.get("EMAIL_FROM", EMAIL_USER)
 
 # -------------------------------------------------------
-# Función para enviar email
+# Función para enviar email (CORREGIDA para SMTP_SSL/465 y manejo de errores)
 # -------------------------------------------------------
 def send_email(to_address, subject, body):
     host = os.environ.get("EMAIL_HOST")
-    port = int(os.environ.get("EMAIL_PORT") or 25)
+    # Usamos 465 como default ya que es el estándar para SSL
+    port = int(os.environ.get("EMAIL_PORT") or 465) 
     user = os.environ.get("EMAIL_USER")
     password = os.environ.get("EMAIL_PASS")
     from_addr = os.environ.get("EMAIL_FROM", user)
@@ -46,18 +48,38 @@ def send_email(to_address, subject, body):
     msg["Subject"] = subject
     msg["From"] = from_addr
     msg["To"] = to_address
-
-    s = smtplib.SMTP(host, port, timeout=10)
+    
+    # Contexto de seguridad para TLS/SSL
+    context = ssl.create_default_context()
+    
+    # Usamos SMTP_SSL para conexión segura directa (necesario en Render con puerto 465)
+    s = smtplib.SMTP_SSL(host, port, timeout=10, context=context)
+    
     try:
+        logging.info(f"Intentando login SMTP con {user} en el puerto {port}...")
+        
         if user and password:
-            s.starttls()
-            s.login(user, password)
+            # NO usamos s.starttls() con SMTP_SSL
+            s.login(user, password) 
+        
         s.sendmail(from_addr, [to_address], msg.as_string())
+        logging.info(f"Correo enviado exitosamente a {to_address}")
+
+    except smtplib.SMTPAuthenticationError as auth_err:
+        logging.error(f"❌ Error de autenticación SMTP: {auth_err}")
+        # Relanzamos para que la ruta /admin/generate-token capture el error
+        raise Exception("Error de autenticación al enviar el email. Revisar EMAIL_PASS/USER.")
+
+    except Exception as e:
+        logging.error(f"❌ Error general al enviar el email: {e}")
+        # Relanzamos para que la ruta /admin/generate-token capture el error
+        raise Exception("Error de conexión SMTP. Revisar HOST/PORT/RED.")
+
     finally:
         s.quit()
 
 # -------------------------------------------------------
-# Ruta admin para generar token manualmente
+# Ruta admin para generar token manualmente (CORREGIDA - Ya contiene la lógica de envío)
 # -------------------------------------------------------
 @app.route("/admin/generate-token", methods=["POST"])
 def generate_token():
@@ -81,7 +103,7 @@ def generate_token():
         # 1. Generar Token
         token = make_license(email)
 
-        # 2. Preparar el Email (ESTO FALTABA)
+        # 2. Preparar el Email 
         subject = "Tu licencia - Mercenary Help Finder"
         body = (
             "Gracias por tu compra (Generada Manualmente).\n\n"
@@ -90,7 +112,7 @@ def generate_token():
             "Pegalo en la UI para activar tu licencia."
         )
 
-        # 3. Enviar el Email (ESTO FALTABA)
+        # 3. Enviar el Email
         logging.info(f"Intentando enviar email manual a: {email}")
         send_email(email, subject, body)
 
@@ -99,6 +121,7 @@ def generate_token():
     except Exception as e:
         # Esto capturará si falla la contraseña o el host y lo mostrará en el log
         logging.exception("Error en el proceso de generar token / enviar email")
+        # El error capturado es el que relanza la función send_email
         return jsonify({"error": str(e)}), 500
 
 # -------------------------------------------------------
