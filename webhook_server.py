@@ -13,64 +13,70 @@ from flask import Flask, request, jsonify, Response
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
-# Importación de la lógica de generación de licencias
 from license_generator import make_license
 
-# Logging de arranque para verificar despliegue
 logging.basicConfig(level=logging.INFO)
-logging.info("WEBHOOK_SERVER LOADED - CASADEY v3")
+logging.info("WEBHOOK_SERVER LOADED - CASADEY v4 🔥")
 
 app = Flask(__name__)
 
-# Configuración de otras variables de entorno
-stripe_api_key = os.environ.get("STRIPE_API_KEY")
-STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET")
-
+# Variables
 EMAIL_HOST = os.environ.get("EMAIL_HOST")
 EMAIL_PORT = os.environ.get("EMAIL_PORT")
 EMAIL_USER = os.environ.get("EMAIL_USER")
 EMAIL_PASS = os.environ.get("EMAIL_PASS")
 EMAIL_FROM = os.environ.get("EMAIL_FROM", EMAIL_USER)
+ADMIN_KEY = os.environ.get("ADMIN_KEY")
+
 
 # -------------------------------------------------------
-# Función para enviar email
+# Enviar Email
 # -------------------------------------------------------
 def send_email(to_address, subject, body):
-    host = os.environ.get("EMAIL_HOST")
-    port = int(os.environ.get("EMAIL_PORT") or 25)
-    user = os.environ.get("EMAIL_USER")
-    password = os.environ.get("EMAIL_PASS")
-    from_addr = os.environ.get("EMAIL_FROM", user)
+    logging.info("📧 Enviando email:")
+    logging.info(f"  Host: {EMAIL_HOST}")
+    logging.info(f"  Port: {EMAIL_PORT}")
+    logging.info(f"  User: {EMAIL_USER}")
+    logging.info(f"  To:   {to_address}")
 
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = from_addr
-    msg["To"] = to_address
-
-    s = smtplib.SMTP(host, port, timeout=10)
     try:
+        host = EMAIL_HOST
+        port = int(EMAIL_PORT or 587)
+        user = EMAIL_USER
+        password = EMAIL_PASS
+        from_addr = EMAIL_FROM
+
+        msg = MIMEText(body)
+        msg["Subject"] = subject
+        msg["From"] = from_addr
+        msg["To"] = to_address
+
+        s = smtplib.SMTP(host, port, timeout=20)
+        s.set_debuglevel(1)   # LOG SMTP COMPLETO
+
         if user and password:
             s.starttls()
             s.login(user, password)
+
         s.sendmail(from_addr, [to_address], msg.as_string())
-    finally:
         s.quit()
+        logging.info("✔️ Email enviado correctamente")
+
+    except Exception as e:
+        logging.error(f"❌ ERROR enviando email: {e}")
+
 
 # -------------------------------------------------------
-# Ruta admin para generar token manualmente
+# Admin — generar token manual
 # -------------------------------------------------------
 @app.route("/admin/generate-token", methods=["POST"])
-def generate_token():
-    expected_key = os.environ.get("ADMIN_KEY")
+def admin_generate_token():
+    logging.info("📩 /admin/generate-token llamado")
+
     provided_key = request.headers.get("X-Admin-Key")
-
-    if not expected_key:
-        logging.error("ADMIN_KEY no está definida en el entorno")
-        return Response("Server misconfigured", status=500)
-
-    if provided_key != expected_key:
-        logging.info("Unauthorized attempt to /admin/generate-token")
-        return Response("Unauthorized", status=401)
+    if provided_key != ADMIN_KEY:
+        logging.error("⛔ Admin-Key incorrecta")
+        return Response("Unauthorized", 401)
 
     try:
         payload = request.get_json(force=True)
@@ -79,43 +85,29 @@ def generate_token():
             return jsonify({"error": "email required"}), 400
 
         token = make_license(email)
-        return jsonify({"token": token}), 200
+
+        logging.info(f"✔️ Token generado: {token}")
+
+        # Enviar email
+        subject = "Tu licencia - Mercenary Help Finder"
+        body = f"Tu token es:\n{token}\n\nGracias por tu compra."
+
+        send_email(email, subject, body)
+
+        return jsonify({"token": token, "sent_to": email}), 200
+
     except Exception as e:
-        logging.exception("Error generating token")
+        logging.exception("🔥 ERROR en /admin/generate-token")
         return jsonify({"error": "internal error"}), 500
 
-# -------------------------------------------------------
-# Webhook genérico
-# -------------------------------------------------------
-@app.route("/webhook", methods=["POST"])
-def webhook_handler():
-    expected_key = os.environ.get("ADMIN_KEY")
-    provided_key = request.headers.get("X-Admin-Key")
-
-    if not expected_key:
-        logging.error("ADMIN_KEY no está definida en el entorno")
-        return Response("Server misconfigured", status=500)
-
-    if provided_key != expected_key:
-        logging.info("Unauthorized webhook call")
-        return Response("Unauthorized", status=401)
-
-    try:
-        data = request.get_json(force=True)
-        logging.info("Received webhook event")
-        return jsonify({"status": "ok"}), 200
-    except Exception:
-        logging.exception("Error processing webhook")
-        return jsonify({"error": "internal error"}), 500
 
 # -------------------------------------------------------
-# 🌟 WEBHOOK DE PAYPAL — GENERA Y ENVÍA EL TOKEN
+# Webhook PayPal (NO TOCAMOS NADA)
 # -------------------------------------------------------
 @app.route("/paypal-webhook", methods=["POST"])
 def paypal_webhook():
     try:
         data = request.get_json(force=True)
-
         logging.info("📩 PAYPAL WEBHOOK RECIBIDO")
         logging.info(json.dumps(data, indent=2))
 
@@ -125,9 +117,7 @@ def paypal_webhook():
             logging.info(f"Ignorado evento PayPal: {event_type}")
             return jsonify({"status": "ignored"}), 200
 
-        # ---------------------------------------------------
-        # 1) INTENTO ANTIGUO (payer -> payer_info)
-        # ---------------------------------------------------
+        # Buscar email del comprador en diferentes formatos
         email = (
             data.get("resource", {})
                 .get("payer", {})
@@ -135,9 +125,6 @@ def paypal_webhook():
                 .get("email")
         )
 
-        # ---------------------------------------------------
-        # 2) INTENTO NUEVO (resource -> payer -> email_address)
-        # ---------------------------------------------------
         if not email:
             email = (
                 data.get("resource", {})
@@ -145,38 +132,26 @@ def paypal_webhook():
                     .get("email_address")
             )
 
-        # ---------------------------------------------------
-        # 3) FORMATO MÁS NUEVO AÚN (purchase_units[n].shipping/email)
-        # ---------------------------------------------------
         if not email:
             purchase_units = data.get("resource", {}).get("purchase_units", [])
             if purchase_units and isinstance(purchase_units, list):
                 shipping = purchase_units[0].get("shipping", {})
                 email = shipping.get("email") or shipping.get("email_address")
 
-        # ---------------------------------------------------
-        # Si sigue sin email: error
-        # ---------------------------------------------------
         if not email:
-            logging.error("❌ No se pudo encontrar el email del comprador (ningún formato conocido).")
+            logging.error("❌ Email no encontrado")
             return jsonify({"error": "email not found"}), 400
 
         logging.info(f"📨 Email detectado: {email}")
 
-        # Generar token
         token = make_license(email)
 
         subject = "Tu licencia - Mercenary Help Finder"
-        body = (
-            "Gracias por tu compra.\n\n"
-            "Tu token es:\n"
-            f"{token}\n\n"
-            "Pegalo en la UI para activar tu licencia."
-        )
+        body = f"Tu token es:\n{token}\n\nPegalo en la UI."
 
         send_email(email, subject, body)
 
-        logging.info(f"✔️ Token enviado a {email}")
+        logging.info(f"✔️ Enviado token a {email}")
 
         return jsonify({"status": "success"}), 200
 
@@ -184,8 +159,9 @@ def paypal_webhook():
         logging.exception("Error en PayPal webhook")
         return jsonify({"error": "internal error"}), 500
 
+
 # -------------------------------------------------------
-# Punto de entrada local
+# Main local
 # -------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
