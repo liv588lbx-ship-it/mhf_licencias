@@ -6,8 +6,9 @@ import base64
 import hashlib
 import smtplib
 import logging
-import ssl # <--- ¡IMPORTACIÓN AÑADIDA!
+import ssl 
 from email.mime.text import MIMEText
+from email.header import Header
 from datetime import datetime, timedelta
 
 from flask import Flask, request, jsonify, Response
@@ -31,32 +32,63 @@ EMAIL_HOST = os.environ.get("EMAIL_HOST")
 EMAIL_PORT = os.environ.get("EMAIL_PORT")
 EMAIL_USER = os.environ.get("EMAIL_USER")
 EMAIL_PASS = os.environ.get("EMAIL_PASS")
-EMAIL_FROM = os.environ.get("EMAIL_FROM", EMAIL_USER)
 
 # -------------------------------------------------------
-# Función para enviar email (CORREGIDA para STARTTLS/587 con SendGrid)
+# MODIFICACIONES SOLICITADAS:
+# 1. DISPLAY NAME y 2. TRADUCCIONES
+# -------------------------------------------------------
+EMAIL_FROM = os.environ.get("EMAIL_FROM", EMAIL_USER)
+DISPLAY_NAME = os.environ.get("EMAIL_DISPLAY_NAME", "TotalHelper") # Nombre del remitente
+DEFAULT_LANG = os.environ.get("DEFAULT_LANG", "en") # Idioma por defecto
+
+MESSAGES = {
+    "es": {
+        "subject": "Tu Licencia - Mercenary Help Finder",
+        "greeting": "Hola Guerrero, Muchas gracias por tu compra.",
+        "token_line": "Tu Token es:",
+        "manual_note": "(Generada Manualmente).",
+        "instruction": "Asegúrate de Leer las Instrucciones de Uso en el Software Mercenary Finder, Activar tu Licencia y a disfrutar del Intercambio de Mercenarios. ¡Apurate, el tiempo corre!"
+    },
+    "en": {
+        "subject": "Your License - Mercenary Help Finder",
+        "greeting": "Hello Warrior, Thank you very much for your purchase.",
+        "token_line": "Your Token is:",
+        "manual_note": "(Manually Generated).",
+        "instruction": "Be sure to Read the Usage Instructions in the Mercenary Finder Software, Activate your License and enjoy the Mercenary Exchange. Hurry up, time is ticking!"
+    }
+}
+# -------------------------------------------------------
+# FIN MODIFICACIONES
+# -------------------------------------------------------
+
+
+# -------------------------------------------------------
+# Función para enviar email (Corregida para STARTTLS/587 con SendGrid)
 # -------------------------------------------------------
 def send_email(to_address, subject, body):
     host = os.environ.get("EMAIL_HOST")
-    # Usamos 587 como default, que es el puerto estándar para STARTTLS
     port = int(os.environ.get("EMAIL_PORT") or 587) 
     user = os.environ.get("EMAIL_USER")
     password = os.environ.get("EMAIL_PASS")
     from_addr = os.environ.get("EMAIL_FROM", user)
+    display_name = os.environ.get("EMAIL_DISPLAY_NAME", "TotalHelper")
+
+    # Formatear la dirección del remitente: "TotalHelper" <liv588lbx@gmail.com>
+    # Usamos Header para codificar el nombre si tiene caracteres especiales (no necesario para TotalHelper, pero buena práctica)
+    full_from_address = str(Header(f"{display_name} <{from_addr}>"))
 
     msg = MIMEText(body)
     msg["Subject"] = subject
-    msg["From"] = from_addr
+    # USAMOS EL FORMATO COMPLETO AQUÍ
+    msg["From"] = full_from_address 
     msg["To"] = to_address
     
-    # 1. Usamos SMTP (sin _SSL) para iniciar la conexión
     s = smtplib.SMTP(host, port, timeout=10)
     
     try:
         logging.info(f"Intentando login SMTP con {user} en el puerto {port}...")
         
         if user and password:
-            # 2. Hacemos el upgrade a conexión segura con STARTTLS (Requiere puerto 587)
             s.starttls() 
             s.login(user, password) 
         
@@ -65,19 +97,17 @@ def send_email(to_address, subject, body):
 
     except smtplib.SMTPAuthenticationError as auth_err:
         logging.error(f"❌ Error de autenticación SMTP: {auth_err}")
-        # Relanzamos para capturar el error en la ruta Flask
         raise Exception("Error de autenticación al enviar el email. Revisar EMAIL_PASS/USER.")
 
     except Exception as e:
         logging.error(f"❌ Error general al enviar el email: {e}")
-        # Relanzamos para capturar el error en la ruta Flask (ej: bloqueo de firewall/red)
         raise Exception(f"Error de conexión SMTP: {e}. Revisar HOST/PORT.")
 
     finally:
         s.quit()
 
 # -------------------------------------------------------
-# Ruta admin para generar token manualmente (CORREGIDA - Ya contiene la lógica de envío)
+# Ruta admin para generar token manualmente
 # -------------------------------------------------------
 @app.route("/admin/generate-token", methods=["POST"])
 def generate_token():
@@ -101,25 +131,27 @@ def generate_token():
         # 1. Generar Token
         token = make_license(email)
 
-        # 2. Preparar el Email 
-        subject = "Tu licencia - Mercenary Help Finder"
+        # 2. SELECCIONAR IDIOMA (Usamos el idioma por defecto)
+        lang = DEFAULT_LANG 
+        texts = MESSAGES.get(lang, MESSAGES["en"]) # Usa Inglés como fallback.
+
+        # 3. Preparar el Email 
+        subject = texts["subject"]
         body = (
-            "Gracias por tu compra (Generada Manualmente).\n\n"
-            "Tu token es:\n"
+            f"{texts['greeting']} {texts['manual_note']}\n\n"
+            f"{texts['token_line']}\n"
             f"{token}\n\n"
-            "Pegalo en la UI para activar tu licencia."
+            f"{texts['instruction']}"
         )
 
-        # 3. Enviar el Email
+        # 4. Enviar el Email
         logging.info(f"Intentando enviar email manual a: {email}")
         send_email(email, subject, body)
 
         return jsonify({"token": token, "message": "Email enviado"}), 200
 
     except Exception as e:
-        # Esto capturará si falla la contraseña o el host y lo mostrará en el log
         logging.exception("Error en el proceso de generar token / enviar email")
-        # El error capturado es el que relanza la función send_email
         return jsonify({"error": str(e)}), 500
 
 # -------------------------------------------------------
@@ -163,38 +195,25 @@ def paypal_webhook():
             logging.info(f"Ignorado evento PayPal: {event_type}")
             return jsonify({"status": "ignored"}), 200
 
-        # ---------------------------------------------------
-        # 1) INTENTO ANTIGUO (payer -> payer_info)
-        # ---------------------------------------------------
+        # Lógica para extraer el email del JSON de PayPal
         email = (
             data.get("resource", {})
-                .get("payer", {})
-                .get("payer_info", {})
-                .get("email")
+            .get("payer", {})
+            .get("payer_info", {})
+            .get("email")
         )
-
-        # ---------------------------------------------------
-        # 2) INTENTO NUEVO (resource -> payer -> email_address)
-        # ---------------------------------------------------
         if not email:
             email = (
                 data.get("resource", {})
                     .get("payer", {})
                     .get("email_address")
             )
-
-        # ---------------------------------------------------
-        # 3) FORMATO MÁS NUEVO AÚN (purchase_units[n].shipping/email)
-        # ---------------------------------------------------
         if not email:
             purchase_units = data.get("resource", {}).get("purchase_units", [])
             if purchase_units and isinstance(purchase_units, list):
                 shipping = purchase_units[0].get("shipping", {})
                 email = shipping.get("email") or shipping.get("email_address")
 
-        # ---------------------------------------------------
-        # Si sigue sin email: error
-        # ---------------------------------------------------
         if not email:
             logging.error("❌ No se pudo encontrar el email del comprador (ningún formato conocido).")
             return jsonify({"error": "email not found"}), 400
@@ -204,12 +223,16 @@ def paypal_webhook():
         # Generar token
         token = make_license(email)
 
-        subject = "Tu licencia - Mercenary Help Finder"
+        # SELECCIONAR IDIOMA (Usamos el idioma por defecto)
+        lang = DEFAULT_LANG
+        texts = MESSAGES.get(lang, MESSAGES["en"]) 
+        
+        subject = texts["subject"]
         body = (
-            "Gracias por tu compra.\n\n"
-            "Tu token es:\n"
+            f"{texts['greeting']}\n\n"
+            f"{texts['token_line']}\n"
             f"{token}\n\n"
-            "Pegalo en la UI para activar tu licencia."
+            f"{texts['instruction']}"
         )
 
         send_email(email, subject, body)
