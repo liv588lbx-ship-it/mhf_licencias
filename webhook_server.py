@@ -34,12 +34,12 @@ EMAIL_PASS = os.environ.get("EMAIL_PASS")
 EMAIL_FROM = os.environ.get("EMAIL_FROM", EMAIL_USER)
 
 # -------------------------------------------------------
-# Función para enviar email (CORREGIDA para SMTP_SSL/465 y manejo de errores)
+# Función para enviar email (CORREGIDA para STARTTLS/587 con SendGrid)
 # -------------------------------------------------------
 def send_email(to_address, subject, body):
     host = os.environ.get("EMAIL_HOST")
-    # Usamos 465 como default ya que es el estándar para SSL
-    port = int(os.environ.get("EMAIL_PORT") or 465) 
+    # Usamos 587 como default, que es el puerto estándar para STARTTLS
+    port = int(os.environ.get("EMAIL_PORT") or 587) 
     user = os.environ.get("EMAIL_USER")
     password = os.environ.get("EMAIL_PASS")
     from_addr = os.environ.get("EMAIL_FROM", user)
@@ -49,17 +49,15 @@ def send_email(to_address, subject, body):
     msg["From"] = from_addr
     msg["To"] = to_address
     
-    # Contexto de seguridad para TLS/SSL
-    context = ssl.create_default_context()
-    
-    # Usamos SMTP_SSL para conexión segura directa (necesario en Render con puerto 465)
-    s = smtplib.SMTP_SSL(host, port, timeout=10, context=context)
+    # 1. Usamos SMTP (sin _SSL) para iniciar la conexión
+    s = smtplib.SMTP(host, port, timeout=10)
     
     try:
         logging.info(f"Intentando login SMTP con {user} en el puerto {port}...")
         
         if user and password:
-            # NO usamos s.starttls() con SMTP_SSL
+            # 2. Hacemos el upgrade a conexión segura con STARTTLS (Requiere puerto 587)
+            s.starttls() 
             s.login(user, password) 
         
         s.sendmail(from_addr, [to_address], msg.as_string())
@@ -67,13 +65,13 @@ def send_email(to_address, subject, body):
 
     except smtplib.SMTPAuthenticationError as auth_err:
         logging.error(f"❌ Error de autenticación SMTP: {auth_err}")
-        # Relanzamos para que la ruta /admin/generate-token capture el error
+        # Relanzamos para capturar el error en la ruta Flask
         raise Exception("Error de autenticación al enviar el email. Revisar EMAIL_PASS/USER.")
 
     except Exception as e:
         logging.error(f"❌ Error general al enviar el email: {e}")
-        # Relanzamos para que la ruta /admin/generate-token capture el error
-        raise Exception("Error de conexión SMTP. Revisar HOST/PORT/RED.")
+        # Relanzamos para capturar el error en la ruta Flask (ej: bloqueo de firewall/red)
+        raise Exception(f"Error de conexión SMTP: {e}. Revisar HOST/PORT.")
 
     finally:
         s.quit()
