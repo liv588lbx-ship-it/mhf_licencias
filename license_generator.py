@@ -1,4 +1,5 @@
-# license_generator.py
+# license_generator.py (VERSION COMPLETA CON GENERACIÓN Y VERIFICACIÓN)
+
 import json
 import base64
 import time
@@ -7,21 +8,18 @@ import os
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
-# 1. Variable global para almacenar la clave una vez cargada
-_PRIVATE_KEY_CACHE = None 
-PRIV_KEY_PATH = "priv.pem"  # Mantiene compatibilidad, aunque ya no se usa
+# --- CONFIGURACIÓN Y CACHÉ DE CLAVE PRIVADA (GENERACIÓN) ---
+
+_PRIVATE_KEY_CACHE = None
+PRIV_KEY_PATH = "priv.pem" 
 
 def load_private_key(path=PRIV_KEY_PATH):
-    """
-    Carga la clave privada desde la variable de entorno PRIVATE_KEY_PEM.
-    Mantiene caché para evitar lecturas repetidas.
-    """
+    # Carga la clave privada desde la variable de entorno PRIVATE_KEY_PEM
     global _PRIVATE_KEY_CACHE
 
     if _PRIVATE_KEY_CACHE is not None:
         return _PRIVATE_KEY_CACHE
 
-    # Intentar leer desde la variable de entorno
     priv_key_pem = os.environ.get("PRIVATE_KEY_PEM")
     if not priv_key_pem:
         raise FileNotFoundError(
@@ -39,18 +37,18 @@ def load_private_key(path=PRIV_KEY_PATH):
         print(f"CRITICAL ERROR: No se pudo cargar la clave privada desde PRIVATE_KEY_PEM: {e}")
         raise e
 
+# --- FUNCIÓN DE GENERACIÓN (make_license) ---
+
 def make_license(user_email, validity_hours=36, priv_key_path=PRIV_KEY_PATH, extra=None):
     """
     Crea un token firmado que representa una licencia.
     """
-    # 2. Cargar la clave privada (de la variable de entorno)
     priv = load_private_key(priv_key_path)
 
     issued = int(time.time())
     expires = issued + int(validity_hours * 3600)
     license_id = str(uuid.uuid4())
 
-    # Payload de la licencia
     payload = {
         "license_id": license_id,
         "user": user_email,
@@ -60,17 +58,14 @@ def make_license(user_email, validity_hours=36, priv_key_path=PRIV_KEY_PATH, ext
         "extra": extra or {}
     }
 
-    # Serializar de forma determinista
     payload_json = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
-    # Firmar la licencia
     signature = priv.sign(
         payload_json,
         padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
         hashes.SHA256()
     )
 
-    # Generar token final (payload + firma codificados en base64)
     token = (
         base64.urlsafe_b64encode(payload_json).decode().rstrip("=")
         + "."
@@ -78,3 +73,68 @@ def make_license(user_email, validity_hours=36, priv_key_path=PRIV_KEY_PATH, ext
     )
 
     return token, payload
+
+# ==============================================================================
+# ✨ LÓGICA DE VERIFICACIÓN AÑADIDA (RESOLUCIÓN DEL IMPORTERROR) ✨
+# ==============================================================================
+
+def load_public_key(path="pub.pem"):
+    """Carga la clave pública desde el archivo pub.pem."""
+    # Render debe tener 'pub.pem' disponible en el entorno raíz
+    with open(path, "rb") as f:
+        return serialization.load_pem_public_key(f.read())
+
+def _b64url_decode_padded(s: str) -> bytes:
+    """Restaura el padding faltante para base64 urlsafe."""
+    s = s.replace("-", "+").replace("_", "/")
+    padding_needed = (4 - len(s) % 4) % 4
+    s += "=" * padding_needed
+    return base64.b64decode(s)
+
+def check_license_base(token, pub_key_path="pub.pem"):
+    """Función de validación base que devuelve (ok, msg, data)."""
+    try:
+        pub = load_public_key(pub_key_path)
+        if "." not in token:
+            return False, "invalid_format", None
+        
+        payload_b64, sig_b64 = token.split(".", 1)
+        payload = _b64url_decode_padded(payload_b64)
+        sig = _b64url_decode_padded(sig_b64)
+        
+        # Verificar firma (si falla, lanza una excepción que se captura abajo)
+        pub.verify(
+            sig,
+            payload,
+            padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH),
+            hashes.SHA256()
+        )
+        
+        data = json.loads(payload)
+        now = int(time.time())
+        
+        if data.get("expires", 0) < now:
+            return False, "expired", data
+            
+        return True, "valid", data
+        
+    except Exception as e:
+        # Error de firma, formato, o cualquier otro problema criptográfico
+        return False, str(e), None
+
+def check_license(token):
+    """
+    Función requerida por webhook_server.py.
+    Verifica el token y lanza una excepción si es inválido o expirado.
+    """
+    ok, msg, data = check_license_base(token)
+
+    if ok:
+        # Éxito: Devuelve los metadatos.
+        return data
+    elif msg == "expired":
+        # Fallo: Lanza excepción específica.
+        raise Exception("LICENCIA EXPIRADA. El tiempo de uso ha terminado.")
+    else:
+        # Fallo: Lanza excepción para firma inválida, etc.
+        raise Exception(f"TOKEN INVÁLIDO o FALLO DE FIRMA: {msg}")
