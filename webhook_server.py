@@ -78,11 +78,28 @@ def generate_token():
         if not email:
             return jsonify({"error": "email required"}), 400
 
+        # 1. Generar Token
         token = make_license(email)
-        return jsonify({"token": token}), 200
+
+        # 2. Preparar el Email (ESTO FALTABA)
+        subject = "Tu licencia - Mercenary Help Finder"
+        body = (
+            "Gracias por tu compra (Generada Manualmente).\n\n"
+            "Tu token es:\n"
+            f"{token}\n\n"
+            "Pegalo en la UI para activar tu licencia."
+        )
+
+        # 3. Enviar el Email (ESTO FALTABA)
+        logging.info(f"Intentando enviar email manual a: {email}")
+        send_email(email, subject, body)
+
+        return jsonify({"token": token, "message": "Email enviado"}), 200
+
     except Exception as e:
-        logging.exception("Error generating token")
-        return jsonify({"error": "internal error"}), 500
+        # Esto capturará si falla la contraseña o el host y lo mostrará en el log
+        logging.exception("Error en el proceso de generar token / enviar email")
+        return jsonify({"error": str(e)}), 500
 
 # -------------------------------------------------------
 # Webhook genérico
