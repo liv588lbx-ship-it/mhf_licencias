@@ -17,7 +17,7 @@ class TokenRequest(BaseModel):
 def send_email(to_email, token):
     try:
         smtp_host = os.environ.get("EMAIL_HOST")
-        smtp_port = smtp_port = int(os.environ.get("EMAIL_PORT", 587))
+        smtp_port = int(os.environ.get("EMAIL_PORT", 587))
         smtp_user = os.environ.get("EMAIL_USER")
         smtp_pass = os.environ.get("EMAIL_PASS")
 
