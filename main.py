@@ -16,10 +16,10 @@ class TokenRequest(BaseModel):
 
 def send_email(to_email, token):
     try:
-        smtp_host = "smtp.gmail.com"
-        smtp_port = 587
-        smtp_user = os.environ.get("SMTP_USER")
-        smtp_pass = os.environ.get("SMTP_PASS")
+        smtp_host = os.environ.get("EMAIL_HOST")
+        smtp_port = smtp_port = int(os.environ.get("EMAIL_PORT", 587))
+        smtp_user = os.environ.get("EMAIL_USER")
+        smtp_pass = os.environ.get("EMAIL_PASS")
 
         msg = MIMEText(f"Tu token de licencia es: {token}")
         msg["Subject"] = "Tu licencia"
