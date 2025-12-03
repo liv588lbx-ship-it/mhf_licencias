@@ -1,9 +1,6 @@
 import os
 import json
-import sqlite3
 import time
-import base64
-import hashlib
 import smtplib
 import logging
 import ssl 
@@ -12,21 +9,12 @@ from email.header import Header
 from datetime import datetime, timedelta
 
 from flask import Flask, request, jsonify, Response
-# Estas son librerías de criptografía que deberían estar importadas
+# Librerías de criptografía
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
 # Importación de la lógica de generación y VERIFICACIÓN de licencias
-from license_generator import make_license, check_license
-
-from flask import Flask, request, jsonify, Response
-# Estas son librerías de criptografía que deberían estar importadas
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding
-
-# Importación de la lógica de generación de licencias
-# Asegúrate de que este archivo y su función make_license(email) existen
-from license_generator import make_license 
+from license_generator import make_license, check_license 
 
 # Logging de arranque para verificar despliegue
 logging.basicConfig(level=logging.INFO)
@@ -36,10 +24,9 @@ app = Flask(__name__)
 
 # --- CONFIGURACIÓN DE VARIABLES DE ENTORNO ---
 # Estas variables deben estar definidas en Render: EMAIL_HOST, EMAIL_PORT, EMAIL_USER, EMAIL_PASS, ADMIN_KEY
-# EMAIL_FROM debe ser tu email verificado (liv588lbx@gmail.com)
 EMAIL_FROM = os.environ.get("EMAIL_FROM") # Debe ser el email verificado (ej: liv588lbx@gmail.com)
 DISPLAY_NAME = os.environ.get("EMAIL_DISPLAY_NAME", "TotalHelper") # Nombre del remitente
-DEFAULT_LANG = os.environ.get("DEFAULT_LANG", "en") # Idioma por defecto (se puede cambiar a "es")
+DEFAULT_LANG = os.environ.get("DEFAULT_LANG", "es") # Establecido en Español
 # -------------------------------------------------------
 
 # --- MENSAJES BILINGÜES CORREGIDOS Y COMPLETOS ---
@@ -92,6 +79,7 @@ def send_email(to_address, subject, body):
     try:
         logging.info(f"Intentando login SMTP con {user} en el puerto {port}...")
         
+        # Iniciar TLS
         s.starttls() 
         s.login(user, password) 
         
@@ -104,14 +92,13 @@ def send_email(to_address, subject, body):
 
     except Exception as e:
         logging.error(f"❌ Error general al enviar el email: {e}")
-        # El 550 Sender Identity sigue siendo un error aquí si EMAIL_FROM no está bien
         raise Exception(f"Error de conexión SMTP: {e}. Revisar HOST/PORT o EMAIL_FROM.")
 
     finally:
         s.quit()
 
 # -------------------------------------------------------
-# Ruta admin para generar token manualmente (CORREGIDA)
+# Ruta admin para generar token manualmente
 # -------------------------------------------------------
 @app.route("/admin/generate-token", methods=["POST"])
 def generate_token():
@@ -132,8 +119,7 @@ def generate_token():
         if not email:
             return jsonify({"error": "email required"}), 400
 
-        # 1. Generar Token: DESEMPAQUETAR TUPLA (CORRECCIÓN CLAVE)
-        # make_license devuelve (token, metadata). Solo necesitamos el token para el cliente.
+        # 1. Generar Token: make_license devuelve (token, metadata)
         token, metadata = make_license(email) 
 
         # 2. SELECCIONAR IDIOMA
@@ -145,7 +131,7 @@ def generate_token():
         body = (
             f"{texts['greeting']} {texts['manual_note']}\n\n"
             f"{texts['token_line']}\n"
-            f"{token}\n\n" # <--- SOLO el token, no la tupla completa
+            f"{token}\n\n"
             f"{texts['instruction']}"
         )
 
@@ -161,7 +147,42 @@ def generate_token():
         return jsonify({"error": str(e)}), 500
 
 # -------------------------------------------------------
-# Webhook genérico (Sin Cambios)
+# ✨ RUTA DE VALIDACIÓN (CRUCIAL PARA RESOLVER EL 404) ✨
+# -------------------------------------------------------
+@app.route("/license/check", methods=["POST"])
+def license_check():
+    """
+    Verifica un token de licencia proporcionado por el cliente
+    utilizando la lógica criptográfica de license_generator.py.
+    """
+    try:
+        # Se asume que el token se envía en el cuerpo JSON de la solicitud
+        data = request.json
+        token = data.get("token")
+
+        if not token:
+            return jsonify({"status": "error", "message": "Missing 'token' in request payload."}), 400
+
+        # Llama a la lógica de verificación criptográfica.
+        # Esta función lanza una excepción si el token es inválido o expirado.
+        metadata = check_license(token)
+        
+        # Si llega aquí, el token es válido y activo.
+        return jsonify({
+            "status": "valid", 
+            "message": "Token is valid and active.", 
+            "metadata": metadata
+        }), 200
+
+    except Exception as e:
+        # Captura las excepciones lanzadas por check_license (ej. "LICENCIA EXPIRADA")
+        return jsonify({
+            "status": "invalid", 
+            "message": str(e)
+        }), 401
+
+# -------------------------------------------------------
+# Webhook genérico
 # -------------------------------------------------------
 @app.route("/webhook", methods=["POST"])
 def webhook_handler():
@@ -185,7 +206,7 @@ def webhook_handler():
         return jsonify({"error": "internal error"}), 500
 
 # -------------------------------------------------------
-# 🌟 WEBHOOK DE PAYPAL — GENERA Y ENVÍA EL TOKEN (CORREGIDA)
+# WEBHOOK DE PAYPAL
 # -------------------------------------------------------
 @app.route("/paypal-webhook", methods=["POST"])
 def paypal_webhook():
@@ -193,15 +214,13 @@ def paypal_webhook():
         data = request.get_json(force=True)
 
         logging.info("📩 PAYPAL WEBHOOK RECIBIDO")
-        # logging.info(json.dumps(data, indent=2)) # Descomentar para debug
-
         event_type = data.get("event_type")
 
         if event_type not in ["PAYMENT.SALE.COMPLETED", "PAYMENT.CAPTURE.COMPLETED"]:
             logging.info(f"Ignorado evento PayPal: {event_type}")
             return jsonify({"status": "ignored"}), 200
 
-        # Lógica para extraer el email del JSON de PayPal
+        # Lógica para extraer el email del JSON de PayPal (varios formatos)
         email = (
             data.get("resource", {})
             .get("payer", {})
@@ -226,7 +245,7 @@ def paypal_webhook():
 
         logging.info(f"📨 Email detectado: {email}")
 
-        # Generar token: DESEMPAQUETAR TUPLA (CORRECCIÓN CLAVE)
+        # Generar token
         token, metadata = make_license(email)
 
         # SELECCIONAR IDIOMA
@@ -237,7 +256,7 @@ def paypal_webhook():
         body = (
             f"{texts['greeting']}\n\n"
             f"{texts['token_line']}\n"
-            f"{token}\n\n" # <--- SOLO el token, no la tupla completa
+            f"{token}\n\n"
             f"{texts['instruction']}"
         )
 
@@ -250,6 +269,15 @@ def paypal_webhook():
     except Exception as e:
         logging.exception("Error en PayPal webhook")
         return jsonify({"error": "internal error"}), 500
+
+# -------------------------------------------------------
+# Ruta de verificación de estado (Health Check)
+# -------------------------------------------------------
+@app.route("/", methods=["GET"])
+def health_check():
+    """Ruta para que Render/servicios externos verifiquen que el servidor está online."""
+    return jsonify({"status": "ok", "message": "Service is running"}), 200
+
 
 # -------------------------------------------------------
 # Punto de entrada local
