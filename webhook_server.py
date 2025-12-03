@@ -12,75 +12,71 @@ from email.header import Header
 from datetime import datetime, timedelta
 
 from flask import Flask, request, jsonify, Response
+# Estas son librerías de criptografía que deberían estar importadas
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
 # Importación de la lógica de generación de licencias
-from license_generator import make_license
+# Asegúrate de que este archivo y su función make_license(email) existen
+from license_generator import make_license 
 
 # Logging de arranque para verificar despliegue
 logging.basicConfig(level=logging.INFO)
-logging.info("WEBHOOK_SERVER LOADED - CASADEY v3")
+logging.info("WEBHOOK_SERVER LOADED - CASADEY v4 (Final)")
 
 app = Flask(__name__)
 
-# Configuración de otras variables de entorno
-stripe_api_key = os.environ.get("STRIPE_API_KEY")
-STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET")
-
-EMAIL_HOST = os.environ.get("EMAIL_HOST")
-EMAIL_PORT = os.environ.get("EMAIL_PORT")
-EMAIL_USER = os.environ.get("EMAIL_USER")
-EMAIL_PASS = os.environ.get("EMAIL_PASS")
-
-# -------------------------------------------------------
-# MODIFICACIONES SOLICITADAS:
-# 1. DISPLAY NAME y 2. TRADUCCIONES
-# -------------------------------------------------------
-EMAIL_FROM = os.environ.get("EMAIL_FROM", EMAIL_USER)
+# --- CONFIGURACIÓN DE VARIABLES DE ENTORNO ---
+# Estas variables deben estar definidas en Render: EMAIL_HOST, EMAIL_PORT, EMAIL_USER, EMAIL_PASS, ADMIN_KEY
+# EMAIL_FROM debe ser tu email verificado (liv588lbx@gmail.com)
+EMAIL_FROM = os.environ.get("EMAIL_FROM") # Debe ser el email verificado (ej: liv588lbx@gmail.com)
 DISPLAY_NAME = os.environ.get("EMAIL_DISPLAY_NAME", "TotalHelper") # Nombre del remitente
-DEFAULT_LANG = os.environ.get("DEFAULT_LANG", "en") # Idioma por defecto
+DEFAULT_LANG = os.environ.get("DEFAULT_LANG", "en") # Idioma por defecto (se puede cambiar a "es")
+# -------------------------------------------------------
 
+# --- MENSAJES BILINGÜES CORREGIDOS Y COMPLETOS ---
 MESSAGES = {
     "es": {
         "subject": "Tu Licencia - Mercenary Help Finder",
         "greeting": "Hola Guerrero, Muchas gracias por tu compra.",
-        "token_line": "Tu Token es:",
         "manual_note": "(Generada Manualmente).",
+        "token_line": "Tu Token es:",
         "instruction": "Asegúrate de Leer las Instrucciones de Uso en el Software Mercenary Finder, Activar tu Licencia y a disfrutar del Intercambio de Mercenarios. ¡Apurate, el tiempo corre!"
     },
     "en": {
         "subject": "Your License - Mercenary Help Finder",
         "greeting": "Hello Warrior, Thank you very much for your purchase.",
-        "token_line": "Your Token is:",
         "manual_note": "(Manually Generated).",
+        "token_line": "Your Token is:",
         "instruction": "Be sure to Read the Usage Instructions in the Mercenary Finder Software, Activate your License and enjoy the Mercenary Exchange. Hurry up, time is ticking!"
     }
 }
 # -------------------------------------------------------
-# FIN MODIFICACIONES
-# -------------------------------------------------------
 
 
 # -------------------------------------------------------
-# Función para enviar email (Corregida para STARTTLS/587 con SendGrid)
+# Función para enviar email (Con Display Name y STARTTLS)
 # -------------------------------------------------------
 def send_email(to_address, subject, body):
+    # Obtener credenciales del entorno (usamos .get() con fallback)
     host = os.environ.get("EMAIL_HOST")
     port = int(os.environ.get("EMAIL_PORT") or 587) 
     user = os.environ.get("EMAIL_USER")
     password = os.environ.get("EMAIL_PASS")
-    from_addr = os.environ.get("EMAIL_FROM", user)
+    # Usamos la dirección verificada para el campo técnico 'from'
+    from_addr = os.environ.get("EMAIL_FROM", user) 
     display_name = os.environ.get("EMAIL_DISPLAY_NAME", "TotalHelper")
 
+    if not host or not user or not password or not from_addr:
+        logging.error("❌ Faltan credenciales de email (HOST, USER, PASS, FROM).")
+        raise Exception("Faltan variables de entorno SMTP requeridas.")
+
     # Formatear la dirección del remitente: "TotalHelper" <liv588lbx@gmail.com>
-    # Usamos Header para codificar el nombre si tiene caracteres especiales (no necesario para TotalHelper, pero buena práctica)
     full_from_address = str(Header(f"{display_name} <{from_addr}>"))
 
     msg = MIMEText(body)
     msg["Subject"] = subject
-    # USAMOS EL FORMATO COMPLETO AQUÍ
-    msg["From"] = full_from_address 
+    msg["From"] = full_from_address # Usamos el formato "Nombre <Email>"
     msg["To"] = to_address
     
     s = smtplib.SMTP(host, port, timeout=10)
@@ -88,9 +84,8 @@ def send_email(to_address, subject, body):
     try:
         logging.info(f"Intentando login SMTP con {user} en el puerto {port}...")
         
-        if user and password:
-            s.starttls() 
-            s.login(user, password) 
+        s.starttls() 
+        s.login(user, password) 
         
         s.sendmail(from_addr, [to_address], msg.as_string())
         logging.info(f"Correo enviado exitosamente a {to_address}")
@@ -101,13 +96,14 @@ def send_email(to_address, subject, body):
 
     except Exception as e:
         logging.error(f"❌ Error general al enviar el email: {e}")
-        raise Exception(f"Error de conexión SMTP: {e}. Revisar HOST/PORT.")
+        # El 550 Sender Identity sigue siendo un error aquí si EMAIL_FROM no está bien
+        raise Exception(f"Error de conexión SMTP: {e}. Revisar HOST/PORT o EMAIL_FROM.")
 
     finally:
         s.quit()
 
 # -------------------------------------------------------
-# Ruta admin para generar token manualmente
+# Ruta admin para generar token manualmente (CORREGIDA)
 # -------------------------------------------------------
 @app.route("/admin/generate-token", methods=["POST"])
 def generate_token():
@@ -128,19 +124,20 @@ def generate_token():
         if not email:
             return jsonify({"error": "email required"}), 400
 
-        # 1. Generar Token
-        token = make_license(email)
+        # 1. Generar Token: DESEMPAQUETAR TUPLA (CORRECCIÓN CLAVE)
+        # make_license devuelve (token, metadata). Solo necesitamos el token para el cliente.
+        token, metadata = make_license(email) 
 
-        # 2. SELECCIONAR IDIOMA (Usamos el idioma por defecto)
-        lang = DEFAULT_LANG 
-        texts = MESSAGES.get(lang, MESSAGES["en"]) # Usa Inglés como fallback.
+        # 2. SELECCIONAR IDIOMA
+        lang = DEFAULT_LANG
+        texts = MESSAGES.get(lang, MESSAGES["en"]) 
 
         # 3. Preparar el Email 
         subject = texts["subject"]
         body = (
             f"{texts['greeting']} {texts['manual_note']}\n\n"
             f"{texts['token_line']}\n"
-            f"{token}\n\n"
+            f"{token}\n\n" # <--- SOLO el token, no la tupla completa
             f"{texts['instruction']}"
         )
 
@@ -148,6 +145,7 @@ def generate_token():
         logging.info(f"Intentando enviar email manual a: {email}")
         send_email(email, subject, body)
 
+        # Devolver solo el token y el mensaje limpio en el JSON de respuesta
         return jsonify({"token": token, "message": "Email enviado"}), 200
 
     except Exception as e:
@@ -155,7 +153,7 @@ def generate_token():
         return jsonify({"error": str(e)}), 500
 
 # -------------------------------------------------------
-# Webhook genérico
+# Webhook genérico (Sin Cambios)
 # -------------------------------------------------------
 @app.route("/webhook", methods=["POST"])
 def webhook_handler():
@@ -179,7 +177,7 @@ def webhook_handler():
         return jsonify({"error": "internal error"}), 500
 
 # -------------------------------------------------------
-# 🌟 WEBHOOK DE PAYPAL — GENERA Y ENVÍA EL TOKEN
+# 🌟 WEBHOOK DE PAYPAL — GENERA Y ENVÍA EL TOKEN (CORREGIDA)
 # -------------------------------------------------------
 @app.route("/paypal-webhook", methods=["POST"])
 def paypal_webhook():
@@ -187,7 +185,7 @@ def paypal_webhook():
         data = request.get_json(force=True)
 
         logging.info("📩 PAYPAL WEBHOOK RECIBIDO")
-        logging.info(json.dumps(data, indent=2))
+        # logging.info(json.dumps(data, indent=2)) # Descomentar para debug
 
         event_type = data.get("event_type")
 
@@ -220,10 +218,10 @@ def paypal_webhook():
 
         logging.info(f"📨 Email detectado: {email}")
 
-        # Generar token
-        token = make_license(email)
+        # Generar token: DESEMPAQUETAR TUPLA (CORRECCIÓN CLAVE)
+        token, metadata = make_license(email)
 
-        # SELECCIONAR IDIOMA (Usamos el idioma por defecto)
+        # SELECCIONAR IDIOMA
         lang = DEFAULT_LANG
         texts = MESSAGES.get(lang, MESSAGES["en"]) 
         
@@ -231,7 +229,7 @@ def paypal_webhook():
         body = (
             f"{texts['greeting']}\n\n"
             f"{texts['token_line']}\n"
-            f"{token}\n\n"
+            f"{token}\n\n" # <--- SOLO el token, no la tupla completa
             f"{texts['instruction']}"
         )
 
